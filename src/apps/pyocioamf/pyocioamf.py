@@ -30,6 +30,10 @@ import xml.etree.ElementTree as ET
 import PyOpenColorIO as ocio
 
 
+# Default color space name for ACES2065-1 (may vary by config)
+# Common names: 'ACES - ACES2065-1' (old configs), 'ACES2065-1' (new configs)
+DEFAULT_ACES_NAMES = ['ACES2065-1', 'ACES - ACES2065-1']
+
 # Namespace URIs for AMF versions
 AMF_NS_V1 = 'urn:ampas:aces:amf:v1.0'
 AMF_NS_V2 = 'urn:ampas:aces:amf:v2.0'
@@ -57,11 +61,33 @@ def get_ocio_major_minor_version(config):
 def find_aces_colorspace_name(config):
     """
     Find the ACES2065-1 colorspace name in the config.
-    Uses the aces_interchange role which is defined in all ACES configs.
+    Different configs may use different names for the same colorspace.
     """
-    if config.hasRole('aces_interchange'):
-        return config.getRoleColorSpace('aces_interchange')
-    # Fallback for non-standard configs
+    # First try the aces_interchange role
+    try:
+        role_cs = config.getColorSpaceNameByRole('aces_interchange')
+        if role_cs:
+            return role_cs
+    except:
+        pass
+
+    # Fall back to searching for common names
+    for name in DEFAULT_ACES_NAMES:
+        try:
+            cs = config.getColorSpace(name)
+            if cs is not None:
+                return name
+        except:
+            continue
+
+    # Last resort: search by alias
+    for cs in config.getColorSpaces():
+        aliases = cs.getAliases() if hasattr(cs, 'getAliases') else []
+        for alias in aliases:
+            if 'aces2065' in alias.lower() or alias in DEFAULT_ACES_NAMES:
+                return cs.getName()
+
+    # Default fallback
     return 'ACES2065-1'
 
 
@@ -180,12 +206,20 @@ def search_looktransforms(config, aces_id, use_amf_ids=False):
                 return lt.getName()
     return None
 
-def must_apply(elem, type):
-    """ Return True if the 'applied' attribute is not already true. """
+def must_apply(elem, type, ignore_applied=False):
+    """ Return True if the 'applied' attribute is not already true.
+
+    When ignore_applied is True, the 'applied' attribute is disregarded and the
+    transform is always processed.
+    """
     if elem is None:
         return False
+    if ignore_applied:
+        if 'applied' in elem.attrib and elem.attrib['applied'].lower() == 'true':
+            print('Processing', type, 'Transform despite applied=true (--ignore-applied-tag)')
+        return True
     if 'applied' in elem.attrib:
-        if elem.attrib['applied'].lower() == 'true': 
+        if elem.attrib['applied'].lower() == 'true':
             print('Skipping', type, 'Transform that was already applied')
             return False
     return True
@@ -207,24 +241,40 @@ def check_lut_path(amf_path, lut_path):
 
     # TODO: Try some other techniques to find the referenced file.
 
-    # Return the (possibly corrected) path of the LUT.
-    return lut_path
+    # Return the (possibly corrected) path of the LUT, always as absolute.
+    return os.path.abspath(lut_path)
 
-def name_ctf_output_file(amf_path):
-    """ Return the path to store the resulting CTF file, based on the AMF name. """
+def name_ctf_output_file(amf_path, output_prefix=None, output_dir=None):
+    """ Return the path to store the resulting CTF file, based on the AMF name.
+
+    When `output_prefix` is a non-empty string, it is inserted before the
+    `.ctf` extension (e.g. `{stem}_{output_prefix}.ctf`) so concurrent runs
+    by different callers don't collide on the same output filename. When
+    `output_dir` is provided the file is written there instead of next to
+    the AMF.
+    """
     import os.path
     prefix, basename = os.path.split(amf_path)
     fname, ext = os.path.splitext(basename)
-    abs_path = os.path.join(prefix, fname + '.ctf')
-    return abs_path
+    tail = f'_{output_prefix}' if output_prefix else ''
+    directory = output_dir if output_dir else prefix
+    return os.path.join(directory, f'{fname}{tail}.ctf')
 
 
-def name_ctf_output_file_split(amf_path, suffix):
-    """ Return the path for a split CTF file with _before or _after suffix. """
+def name_ctf_output_file_split(amf_path, suffix, output_prefix=None, output_dir=None):
+    """ Return the path for a split CTF file with _before or _after suffix.
+
+    When `output_prefix` is a non-empty string, it is appended after the
+    before/after suffix (e.g. `{stem}_{suffix}_{output_prefix}.ctf`). When
+    `output_dir` is provided the file is written there instead of next to
+    the AMF.
+    """
     import os.path
     prefix, basename = os.path.split(amf_path)
     fname, ext = os.path.splitext(basename)
-    return os.path.join(prefix, f'{fname}_{suffix}.ctf')
+    tail = f'_{output_prefix}' if output_prefix else ''
+    directory = output_dir if output_dir else prefix
+    return os.path.join(directory, f'{fname}_{suffix}{tail}.ctf')
 
 
 def split_look_transforms_by_working_location(root, ns):
@@ -308,7 +358,7 @@ def extract_three_floats(elem):
 
 def parse_cdl(look_elem, amf_version):
     """ Return the CDL slope, offset, power, and saturation values from a look element.
-        Supports both ASC CDL element naming conventions: SOPNode/SatNode and ASC_SOP/ASC_SAT.
+        Supports both AMF v1.0 (SOPNode/SatNode) and v2.0 (ASC_SOP/ASC_SAT) element names.
     """
     slopes = [1., 1., 1.]
     offsets = [0., 0., 0.]
@@ -316,7 +366,7 @@ def parse_cdl(look_elem, amf_version):
     sat = 1.
     has_cdl = False
 
-    # Support both ASC CDL element naming conventions
+    # Try v2.0 element names first (ASC_SOP), then fall back to v1.0 (SOPNode)
     sop_elem = look_elem.find('./cdl:ASC_SOP', namespaces=NS)
     if sop_elem is None:
         sop_elem = look_elem.find('./cdl:SOPNode', namespaces=NS)
@@ -333,7 +383,7 @@ def parse_cdl(look_elem, amf_version):
             powers = extract_three_floats(power_elem)
         has_cdl = True
 
-    # Support both ASC CDL saturation element naming conventions
+    # Try v2.0 element names first (ASC_SAT), then fall back to v1.0 (SatNode)
     sat_elem = look_elem.find('./cdl:ASC_SAT', namespaces=NS)
     if sat_elem is None:
         sat_elem = look_elem.find('./cdl:SatNode', namespaces=NS)
@@ -393,9 +443,9 @@ def load_cdl_working_space_transform(config, base_path, look_elem, is_to_direc, 
                 return transform
     return None
 
-def process_look(config, gt, base_path, look_elem, amf_version='1.0', use_amf_ids=False, aces_cs_name='ACES2065-1'):
+def process_look(config, gt, base_path, look_elem, amf_version='1.0', use_amf_ids=False, aces_cs_name='ACES2065-1', ignore_applied=False):
     """ Build a look transform and add it to the supplied OCIO group transform. """
-    if not must_apply(look_elem, 'Look'):
+    if not must_apply(look_elem, 'Look', ignore_applied):
         return
     #
     # LookTransform ACES transformId case.
@@ -630,7 +680,7 @@ def load_aces_ref_config(config_path=None):
     config = ocio.Config().CreateFromFile(config_path)
     return config
 
-def build_ctf(amf_path, exclude_idt=False, exclude_lmt=False, exclude_odt=False, config_path=None):
+def build_ctf(amf_path, exclude_idt=False, exclude_lmt=False, exclude_odt=False, config_path=None, ignore_applied=False, output_prefix=None, output_dir=None):
     """ Build a color pipeline that implements the supplied AMF file and write out a CTF file.
 
     Args:
@@ -685,7 +735,7 @@ def build_ctf(amf_path, exclude_idt=False, exclude_lmt=False, exclude_odt=False,
     #
     if not exclude_idt:
         input_elem = root.find('./aces:pipeline/aces:inputTransform', namespaces=NS)
-        if must_apply(input_elem, 'Input'):
+        if must_apply(input_elem, 'Input', ignore_applied):
             load_input_transform(config, gt, amf_path, input_elem, use_amf_ids, aces_cs_name)
     else:
         print('Skipping Input Transform (IDT) - excluded by user')
@@ -694,7 +744,7 @@ def build_ctf(amf_path, exclude_idt=False, exclude_lmt=False, exclude_odt=False,
     #
     if not exclude_lmt:
         for look_elem in root.findall('./aces:pipeline/aces:lookTransform', namespaces=NS):
-            process_look(config, gt, amf_path, look_elem, amf_version, use_amf_ids, aces_cs_name)
+            process_look(config, gt, amf_path, look_elem, amf_version, use_amf_ids, aces_cs_name, ignore_applied)
     else:
         print('Skipping Look Transform(s) (LMT) - excluded by user')
     #
@@ -702,7 +752,7 @@ def build_ctf(amf_path, exclude_idt=False, exclude_lmt=False, exclude_odt=False,
     #
     if not exclude_odt:
         output_elem = root.find('./aces:pipeline/aces:outputTransform', namespaces=NS)
-        if must_apply(output_elem, 'Output'):
+        if must_apply(output_elem, 'Output', ignore_applied):
             load_output_transform(config, gt, amf_path, output_elem, is_inverse=False, use_amf_ids=use_amf_ids, aces_cs_name=aces_cs_name)
     else:
         print('Skipping Output Transform (ODT) - excluded by user')
@@ -711,11 +761,11 @@ def build_ctf(amf_path, exclude_idt=False, exclude_lmt=False, exclude_odt=False,
     print('\n', gt)
 
     # Write the group transform using OCIO's native file format, CTF.
-    ctf_path = name_ctf_output_file(amf_path)
+    ctf_path = name_ctf_output_file(amf_path, output_prefix, output_dir)
     write_ctf(gt, config, amf_path, ctf_path, 'none')
 
 
-def build_ctf_split(amf_path, exclude_idt=False, exclude_lmt=False, exclude_odt=False, config_path=None):
+def build_ctf_split(amf_path, exclude_idt=False, exclude_lmt=False, exclude_odt=False, config_path=None, ignore_applied=False, output_prefix=None, output_dir=None):
     """
     Build two CTF files split by workingLocation marker.
 
@@ -747,9 +797,8 @@ def build_ctf_split(amf_path, exclude_idt=False, exclude_lmt=False, exclude_odt=
 
     if not has_working_location:
         print('Warning: No workingLocation element found in AMF file.')
-        print('Falling back to generating single CTF file.')
-        print('')
-        build_ctf(amf_path, exclude_idt, exclude_lmt, exclude_odt, config_path)
+        print('Falling back to generating single CTF file.\n')
+        build_ctf(amf_path, exclude_idt, exclude_lmt, exclude_odt, config_path, ignore_applied, output_prefix, output_dir)
         return
 
     print(f'Found workingLocation marker:')
@@ -788,7 +837,7 @@ def build_ctf_split(amf_path, exclude_idt=False, exclude_lmt=False, exclude_odt=
     # Add IDT to before CTF
     if not exclude_idt:
         input_elem = root.find('./aces:pipeline/aces:inputTransform', namespaces=NS)
-        if must_apply(input_elem, 'Input'):
+        if must_apply(input_elem, 'Input', ignore_applied):
             load_input_transform(config, gt_before, amf_path, input_elem, use_amf_ids, aces_cs_name)
             has_before_content = True
     else:
@@ -797,8 +846,8 @@ def build_ctf_split(amf_path, exclude_idt=False, exclude_lmt=False, exclude_odt=
     # Add look transforms BEFORE workingLocation
     if not exclude_lmt:
         for look_elem in before_looks:
-            if must_apply(look_elem, 'Look'):
-                process_look(config, gt_before, amf_path, look_elem, amf_version, use_amf_ids, aces_cs_name)
+            if must_apply(look_elem, 'Look', ignore_applied):
+                process_look(config, gt_before, amf_path, look_elem, amf_version, use_amf_ids, aces_cs_name, ignore_applied)
                 has_before_content = True
     else:
         print('Skipping Look Transform(s) (LMT) - excluded by user')
@@ -806,7 +855,7 @@ def build_ctf_split(amf_path, exclude_idt=False, exclude_lmt=False, exclude_odt=
     # Write before CTF if it has content
     if has_before_content:
         print('\n', gt_before)
-        ctf_path_before = name_ctf_output_file_split(amf_path, 'before')
+        ctf_path_before = name_ctf_output_file_split(amf_path, 'before', output_prefix, output_dir)
         write_ctf(gt_before, config, amf_path, ctf_path_before, 'before')
     else:
         print('\nNo transforms in BEFORE CTF - skipping file generation')
@@ -819,8 +868,8 @@ def build_ctf_split(amf_path, exclude_idt=False, exclude_lmt=False, exclude_odt=
     # Add look transforms AFTER workingLocation
     if not exclude_lmt:
         for look_elem in after_looks:
-            if must_apply(look_elem, 'Look'):
-                process_look(config, gt_after, amf_path, look_elem, amf_version, use_amf_ids, aces_cs_name)
+            if must_apply(look_elem, 'Look', ignore_applied):
+                process_look(config, gt_after, amf_path, look_elem, amf_version, use_amf_ids, aces_cs_name, ignore_applied)
                 has_after_content = True
     else:
         print('Skipping Look Transform(s) (LMT) - excluded by user')
@@ -828,7 +877,7 @@ def build_ctf_split(amf_path, exclude_idt=False, exclude_lmt=False, exclude_odt=
     # Add ODT to after CTF
     if not exclude_odt:
         output_elem = root.find('./aces:pipeline/aces:outputTransform', namespaces=NS)
-        if must_apply(output_elem, 'Output'):
+        if must_apply(output_elem, 'Output', ignore_applied):
             load_output_transform(config, gt_after, amf_path, output_elem, is_inverse=False,
                                   use_amf_ids=use_amf_ids, aces_cs_name=aces_cs_name)
             has_after_content = True
@@ -838,7 +887,7 @@ def build_ctf_split(amf_path, exclude_idt=False, exclude_lmt=False, exclude_odt=
     # Write after CTF if it has content
     if has_after_content:
         print('\n', gt_after)
-        ctf_path_after = name_ctf_output_file_split(amf_path, 'after')
+        ctf_path_after = name_ctf_output_file_split(amf_path, 'after', output_prefix, output_dir)
         write_ctf(gt_after, config, amf_path, ctf_path_after, 'after')
     else:
         print('\nNo transforms in AFTER CTF - skipping file generation')
@@ -846,9 +895,9 @@ def build_ctf_split(amf_path, exclude_idt=False, exclude_lmt=False, exclude_odt=
     # Summary
     print('\n--- Split CTF Generation Complete ---')
     if has_before_content:
-        print(f'  Before CTF: {name_ctf_output_file_split(amf_path, "before")}')
+        print(f'  Before CTF: {name_ctf_output_file_split(amf_path, "before", output_prefix, output_dir)}')
     if has_after_content:
-        print(f'  After CTF: {name_ctf_output_file_split(amf_path, "after")}')
+        print(f'  After CTF: {name_ctf_output_file_split(amf_path, "after", output_prefix, output_dir)}')
 
 
 def main():
@@ -877,6 +926,17 @@ Examples:
                         help='Generate two CTF files split by workingLocation marker (AMF v2.0). '
                              'Creates *_before.ctf (IDT + looks before marker) and '
                              '*_after.ctf (looks after marker + ODT)')
+    parser.add_argument('--ignore-applied-tag', action='store_true',
+                        help='Process transforms even when their applied="true" attribute '
+                             'indicates they were already baked in upstream.')
+    parser.add_argument('--output-prefix', dest='output_prefix', default=None,
+                        help='Optional identifier inserted before the .ctf extension in every '
+                             'output filename (e.g. "{stem}_{prefix}.ctf"). Useful to prevent '
+                             'concurrent callers working in the same directory from clobbering '
+                             'each other\'s CTFs.')
+    parser.add_argument('--output-dir', dest='output_dir', default=None,
+                        help='Directory to write CTF files into. Defaults to the directory '
+                             'containing the AMF. The directory must already exist.')
 
     args = parser.parse_args()
 
@@ -885,13 +945,19 @@ Examples:
                         exclude_idt=args.no_idt,
                         exclude_lmt=args.no_lmt,
                         exclude_odt=args.no_odt,
-                        config_path=args.config_path)
+                        config_path=args.config_path,
+                        ignore_applied=args.ignore_applied_tag,
+                        output_prefix=args.output_prefix,
+                        output_dir=args.output_dir)
     else:
         build_ctf(args.amf_file,
                   exclude_idt=args.no_idt,
                   exclude_lmt=args.no_lmt,
                   exclude_odt=args.no_odt,
-                  config_path=args.config_path)
+                  config_path=args.config_path,
+                  ignore_applied=args.ignore_applied_tag,
+                  output_prefix=args.output_prefix,
+                  output_dir=args.output_dir)
 
 
 if __name__=='__main__':
