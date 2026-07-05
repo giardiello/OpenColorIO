@@ -368,6 +368,10 @@ ConstConfigRcPtr AMFParser::Impl::parse(AMFInfoRcPtr amfInfoObject, const char* 
 
     m_xmlFilePath = amfFilePath;
     m_xmlStream.open(m_xmlFilePath, std::ios_base::in);
+    if (!m_xmlStream.is_open())
+    {
+        throw Exception(("Could not open AMF file: " + m_xmlFilePath).c_str());
+    }
     m_amfInfoObject = amfInfoObject;
 
     XML_SetUserData(m_parser, this);
@@ -847,7 +851,9 @@ void AMFParser::Impl::processInputTransform()
 
     if (m_input.empty())
     {
-        ConstColorSpaceRcPtr cs = searchColorSpaces(ACES);
+        // No input transform: the clip is already in ACES2065-1. Fetch the ACES
+        // color space directly by name (it cannot be found by amf_transform_ids).
+        ConstColorSpaceRcPtr cs = m_refConfig->getColorSpace(ACES);
         if (cs != NULL)
         {
             m_amfConfig->addColorSpace(cs);
