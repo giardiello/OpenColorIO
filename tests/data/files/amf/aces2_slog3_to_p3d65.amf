@@ -6,12 +6,19 @@
             <aces:creationDateTime>2026-01-01T00:00:00.00Z</aces:creationDateTime>
             <aces:modificationDateTime>2026-01-01T00:00:00.00Z</aces:modificationDateTime>
         </aces:dateTime>
+        <aces:uuid>urn:uuid:12345678-1234-4321-8abc-1234567890ab</aces:uuid>
     </aces:amfInfo>
     <aces:clipId>
         <aces:clipName>ACES2_Test_Clip</aces:clipName>
+        <aces:uuid>urn:uuid:11111111-2222-4333-8444-555555555555</aces:uuid>
     </aces:clipId>
     <aces:pipeline>
         <aces:pipelineInfo>
+            <aces:dateTime>
+                <aces:creationDateTime>2026-01-01T00:00:00.00Z</aces:creationDateTime>
+                <aces:modificationDateTime>2026-01-01T00:00:00.00Z</aces:modificationDateTime>
+            </aces:dateTime>
+            <aces:uuid>urn:uuid:87654321-4321-1234-8cba-0987654321fe</aces:uuid>
             <aces:systemVersion>
                 <aces:majorVersion>2</aces:majorVersion>
                 <aces:minorVersion>0</aces:minorVersion>

@@ -49,6 +49,22 @@ namespace OCIO_NAMESPACE
 //
 // Integration boundary: feed the library's parsed AMF object model into the
 // process*() methods in place of the m_input/m_output/m_look/m_clipId members.
+//
+// Validation: the boundary above was prototyped end-to-end against the Python
+// aces-amf-lib v0.1.0 (parse -> object model -> this file's mapping logic ->
+// OCIO processor). Its object model exposes everything process*() needs, as
+// typed values: pipeline.input_transform / .look_transforms / .output_transform
+// with .applied, .transform_id, .file, .asc_sop (.slope/.offset/.power as
+// floats), .asc_sat.saturation, and .cdl_working_space.to/from_cdl_working_space
+// .transform_id; clip_id.clip_name; plus a working-location helper. A C++ port
+// is expected to mirror this shape.
+//
+// Tradeoff to weigh before adopting: the official library is currently AMF
+// v2.0-only and strictly validates the schema and required fields (e.g. it
+// rejects AMFs missing amfInfo/pipelineInfo/clipId uuid or dateTime, and does
+// not read amf:v1.0 documents). This expat-based reader is intentionally more
+// permissive and also handles v1.0. Adopting the library would tighten
+// validation (a feature) but would reject looser/older AMFs this reader accepts.
 // ----------------------------------------------------------------------------
 
 static constexpr char ACES[] = "ACES2065-1";
