@@ -74,6 +74,60 @@ static const std::unordered_map<std::string, std::string> CAMERA_MAPPING =
     {"S-Log3 Venice S-Gamut3.Cine", "Linear Venice S-Gamut3.Cine"}
 };
 
+namespace
+{
+
+// The "amf_transform_ids" interchange attribute stores a newline-separated list
+// of ACES Transform IDs.  Split it into individual (trimmed) IDs.
+std::vector<std::string> SplitAmfTransformIds(const char* ids)
+{
+    std::vector<std::string> result;
+    if (!ids || !*ids)
+        return result;
+
+    std::istringstream iss(ids);
+    std::string line;
+    while (std::getline(iss, line))
+    {
+        const size_t begin = line.find_first_not_of(" \t\r\n");
+        if (begin == std::string::npos)
+            continue;
+        const size_t end = line.find_last_not_of(" \t\r\n");
+        result.push_back(line.substr(begin, end - begin + 1));
+    }
+    return result;
+}
+
+// Determine whether a config element (color space, view transform or look)
+// corresponds to the supplied ACES Transform ID.
+//
+// For OCIO 2.5+ configs (useAmfIds == true) the match is done against the
+// dedicated "amf_transform_ids" interchange attribute, which holds the exact
+// list of Transform IDs the element implements.  For older configs the ID is
+// matched as a substring of the element description (the legacy heuristic).
+template <typename ElementRcPtr>
+bool ElementMatchesTransformId(const ElementRcPtr & element,
+                               const std::string & acesId,
+                               bool useAmfIds)
+{
+    if (useAmfIds)
+    {
+        const std::vector<std::string> ids =
+            SplitAmfTransformIds(element->getInterchangeAttribute("amf_transform_ids"));
+        for (const auto & id : ids)
+        {
+            if (id == acesId)
+                return true;
+        }
+        return false;
+    }
+
+    const std::string desc = element->getDescription();
+    return desc.find(acesId) != std::string::npos;
+}
+
+} // anonymous namespace
+
 class AMFParser::Impl
 {
 private:
@@ -187,7 +241,8 @@ public:
         , m_isInsideLookTransform(false)
         , m_isInsideClipId(false)
         , m_isInsidePipeline(false)
-        , m_numLooksBeforeWorkingLocation(-1) {};
+        , m_numLooksBeforeWorkingLocation(-1)
+        , m_useAmfIds(false) {};
 
     ~Impl()
     {
@@ -263,7 +318,16 @@ private:
     std::vector<AMFTransformRcPtr> m_look;
     bool m_isInsideInputTransform, m_isInsideOutputTransform, m_isInsideLookTransform, m_isInsideClipId, m_isInsidePipeline;
     std::string m_currentElement, m_clipName;
-    size_t m_numLooksBeforeWorkingLocation;
+    // Number of look transforms encountered before the workingLocation marker.
+    // A value of -1 means the AMF has no workingLocation marker, so this must be
+    // a signed type (a size_t sentinel of -1 wraps to SIZE_MAX and breaks the
+    // "< 0" checks below).
+    long m_numLooksBeforeWorkingLocation;
+
+    // Whether the reference config exposes the "amf_transform_ids" interchange
+    // attribute (OCIO 2.5+). When false, transform IDs are matched against the
+    // color space / view transform / look description text instead.
+    bool m_useAmfIds;
 };
 
 void AMFParser::Impl::reset()
@@ -283,6 +347,7 @@ void AMFParser::Impl::reset()
     m_currentElement.clear();
     m_clipName.clear();
     m_numLooksBeforeWorkingLocation = -1;
+    m_useAmfIds = false;
 }
 
 ConstConfigRcPtr AMFParser::Impl::parse(AMFInfoRcPtr amfInfoObject, const char* amfFilePath, const char* configFilePath)
@@ -368,7 +433,7 @@ void AMFParser::Impl::StartElementHandler(void* userData, const XML_Char* name, 
         {
             if (0 == Platform::Strcasecmp(name, AMF_TAG_WORKING_LOCATION))
             {
-                pImpl->m_numLooksBeforeWorkingLocation = pImpl->m_look.size();
+                pImpl->m_numLooksBeforeWorkingLocation = static_cast<long>(pImpl->m_look.size());
             }
             else if (HandleInputTransformStartElement(pImpl, name, atts) ||
                         HandleOutputTransformStartElement(pImpl, name, atts) ||
@@ -454,7 +519,6 @@ bool AMFParser::Impl::HandleLookTransformStartElement(AMFParser::Impl* pImpl, co
         {
             for (int i = 0; atts[i]; i += 2)
             {
-                const char* attrName = atts[i];
                 const char* attrValue = atts[i + 1];
                 pImpl->m_look.back()->addSubElement(AMF_TAG_CDLCCR, attrValue);
             }
@@ -990,6 +1054,12 @@ void AMFParser::Impl::loadACESRefConfig(const char* configFilePath)
             if (minorVersion >= 3)
             {
                 m_refConfig = configFilePath == NULL ? Config::CreateFromBuiltinConfig("studio-config-v2.1.0_aces-v1.3_ocio-v2.3") : Config::CreateFromFile(configFilePath);
+
+                // Configs at profile version 2.5+ carry the "amf_transform_ids"
+                // interchange attribute, which allows resolving AMF Transform IDs
+                // precisely.  Older configs only have the IDs in the descriptions.
+                m_useAmfIds = (m_refConfig->getMajorVersion() > 2) ||
+                              (m_refConfig->getMajorVersion() == 2 && m_refConfig->getMinorVersion() >= 5);
                 return;
             }
         }
@@ -1109,8 +1179,7 @@ ConstViewTransformRcPtr AMFParser::Impl::searchViewTransforms(std::string acesId
     for (auto index = 0; index < numViewTransforms; index++)
     {
         ConstViewTransformRcPtr vt = m_refConfig->getViewTransform(m_refConfig->getViewTransformNameByIndex(index));
-        std::string desc = vt->getDescription();
-        if (desc.find(acesId) != std::string::npos)
+        if (ElementMatchesTransformId(vt, acesId, m_useAmfIds))
             return vt;
     }
     return NULL;
@@ -1412,8 +1481,7 @@ LookRcPtr AMFParser::Impl::searchLookTransforms(std::string acesId)
     for (auto index = 0; index < numLooks; index++)
     {
         ConstLookRcPtr lk = m_refConfig->getLook(m_refConfig->getLookNameByIndex(index));
-        std::string desc = lk->getDescription();
-        if (desc.find(acesId) != std::string::npos)
+        if (ElementMatchesTransformId(lk, acesId, m_useAmfIds))
             return lk->createEditableCopy();
     }
     return NULL;
@@ -1425,8 +1493,7 @@ ConstColorSpaceRcPtr AMFParser::Impl::searchColorSpaces(std::string acesId)
     for (auto index = 0; index < numColorSpaces; index++)
     {
         ConstColorSpaceRcPtr cs = m_refConfig->getColorSpace(m_refConfig->getColorSpaceNameByIndex(SEARCH_REFERENCE_SPACE_ALL, COLORSPACE_ALL, index));
-        std::string desc = cs->getDescription();
-        if (desc.find(acesId) != std::string::npos)
+        if (ElementMatchesTransformId(cs, acesId, m_useAmfIds))
             return cs;
     }
     return NULL;
