@@ -15,6 +15,42 @@
 namespace OCIO_NAMESPACE
 {
 
+// ----------------------------------------------------------------------------
+// NOTE(aces-amf): Potential future integration of the official ACES AMF library
+// ----------------------------------------------------------------------------
+// The Academy is developing an official ACES AMF library (currently Python at
+// https://github.com/ampas/aces-amf, with a C++ version planned before its
+// official release). If/when a stable, packaged C++ library is available, it
+// would be a good candidate to replace the AMF *front-end* below, likely as an
+// optional dependency (AMF support built only when the library is present).
+//
+// The library would REPLACE (XML parsing / model / validation front-end):
+//   * The expat-based parse layer: parse(), StartElementHandler,
+//     EndElementHandler, CharacterDataHandler, the Handle*StartElement /
+//     Handle*EndElement helpers and IsValidElement.
+//   * The intermediate parsed representation: the AMFTransform /
+//     AMFInputTransform / AMFOutputTransform structures and the m_input /
+//     m_output / m_look / m_clipId members (the library exposes its own
+//     AMF object model).
+//   * Ad-hoc file/format validation: checkLutPath(), the file-open check in
+//     parse(), extractThreeFloats(), getCCCId(), getFileDescription() -- the
+//     library provides schema + semantic validation and typed accessors.
+//   * mustApply() and amfReferencesAces2Transforms(), which would read the
+//     'applied' attribute / transform IDs from the library's object model.
+//
+// The library would NOT replace (OCIO-specific AMF -> Config mapping; stays):
+//   * initAMFConfig(), processInputTransform(), processOutputTransform(),
+//     processOutputTransformId(), processLookTransforms()/processLookTransform(),
+//     loadCdlWsTransform(), handleWorkingLocation(), determineClipColorSpace().
+//   * Reference config selection + transform-ID resolution against the OCIO
+//     config: loadACESRefConfig(), searchColorSpaces()/searchViewTransforms()/
+//     searchLookTransforms(), ElementMatchesTransformId(), refRoleColorSpace(),
+//     clearCopiedInteropIds().
+//
+// Integration boundary: feed the library's parsed AMF object model into the
+// process*() methods in place of the m_input/m_output/m_look/m_clipId members.
+// ----------------------------------------------------------------------------
+
 static constexpr char ACES[] = "ACES2065-1";
 
 static constexpr char ACES_LOOK_NAME[] = "ACES Look Transform";
@@ -98,6 +134,12 @@ std::vector<std::string> SplitAmfTransformIds(const char* ids)
     return result;
 }
 
+// NOTE(aces-amf): this resolves an AMF Transform ID against the *OCIO config*
+// and therefore stays OCIO-specific even if the ACES AMF library is adopted.
+// The library (and the official ACES Transform ID Registry) could still be used
+// upstream of this to canonicalize IDs (e.g. resolve v1.5 <-> v2.0 equivalents)
+// before they reach this matcher.
+//
 // Determine whether a config element (color space, view transform or look)
 // corresponds to the supplied ACES Transform ID.
 //
@@ -378,6 +420,11 @@ ConstConfigRcPtr AMFParser::Impl::parse(AMFInfoRcPtr amfInfoObject, const char* 
     XML_SetCharacterDataHandler(m_parser, CharacterDataHandler);
     XML_SetElementHandler(m_parser, StartElementHandler, EndElementHandler);
 
+    // NOTE(aces-amf): swap point. An official ACES AMF C++ library would replace
+    // this expat parse loop (and the handlers/structs it feeds) with a single
+    // call that loads + validates the AMF into a typed object model. The
+    // process*() calls below would then read from that model instead of
+    // m_input/m_output/m_look/m_clipId. See the file header for the full map.
     std::string line;
     m_lineNumber = 0;
     while (m_xmlStream.good())
