@@ -283,6 +283,18 @@ private:
     void loadACESRefConfig(const char* configFilePath = NULL);
     void initAMFConfig();
 
+    // Returns true if the parsed AMF references any ACES v2.0 transform IDs,
+    // used to auto-select an ACES 2 reference config when none is supplied.
+    bool amfReferencesAces2Transforms() const;
+    // Name of the reference config color space assigned to the given role,
+    // or the supplied fallback when the role is not defined.
+    std::string refRoleColorSpace(const char* role, const char* fallback) const;
+    // Clear interop IDs on color spaces copied from the reference config. The
+    // generated AMF config is a minimal derived config that does not carry the
+    // reference config's full set of interop targets, so leaving the IDs in
+    // place would fail config validation.
+    void clearCopiedInteropIds();
+
     void processOutputTransformId(const char* transformId, TransformDirection tDirection);
     void addInactiveCS(const char* csName);
     ConstViewTransformRcPtr searchViewTransforms(std::string acesId);
@@ -358,10 +370,6 @@ ConstConfigRcPtr AMFParser::Impl::parse(AMFInfoRcPtr amfInfoObject, const char* 
     m_xmlStream.open(m_xmlFilePath, std::ios_base::in);
     m_amfInfoObject = amfInfoObject;
 
-    loadACESRefConfig(configFilePath);
-
-    initAMFConfig();
-
     XML_SetUserData(m_parser, this);
     XML_SetCharacterDataHandler(m_parser, CharacterDataHandler);
     XML_SetElementHandler(m_parser, StartElementHandler, EndElementHandler);
@@ -376,6 +384,13 @@ ConstConfigRcPtr AMFParser::Impl::parse(AMFInfoRcPtr amfInfoObject, const char* 
 
         parse(line, !m_xmlStream.good());
     }
+
+    // The reference config is selected only after parsing, so that the AMF's
+    // own transform IDs can drive the choice between an ACES 1.x and an ACES 2
+    // reference config when the caller did not supply one explicitly.
+    loadACESRefConfig(configFilePath);
+
+    initAMFConfig();
 
     processClipId();
     processInputTransform();
@@ -402,7 +417,9 @@ ConstConfigRcPtr AMFParser::Impl::parse(AMFInfoRcPtr amfInfoObject, const char* 
             break;
         }
     }
-    
+
+    clearCopiedInteropIds();
+
     m_amfConfig->validate();
 
     return m_amfConfig;
@@ -1040,60 +1057,152 @@ void AMFParser::Impl::processClipId()
     }
 }
 
-void AMFParser::Impl::loadACESRefConfig(const char* configFilePath)
+bool AMFParser::Impl::amfReferencesAces2Transforms() const
 {
-    std::string ver = GetVersion();
-    if (ver.find("2.") == 0)
+    auto scan = [](const std::vector<std::pair<std::string, std::string>> & elems) -> bool
     {
-        // Extract the number after "2."
-        size_t pos = ver.find('.', 2);
-        if (pos != std::string::npos)
+        for (const auto & elem : elems)
         {
-            std::string minorVersionStr = ver.substr(2, pos - 2);
-            int minorVersion = std::stoi(minorVersionStr);
-            if (minorVersion >= 3)
+            if (0 == Platform::Strcasecmp(elem.first.c_str(), AMF_TAG_TRANSFORMID) &&
+                elem.second.find(":v2.0:") != std::string::npos)
             {
-                m_refConfig = configFilePath == NULL ? Config::CreateFromBuiltinConfig("studio-config-v2.1.0_aces-v1.3_ocio-v2.3") : Config::CreateFromFile(configFilePath);
-
-                // Configs at profile version 2.5+ carry the "amf_transform_ids"
-                // interchange attribute, which allows resolving AMF Transform IDs
-                // precisely.  Older configs only have the IDs in the descriptions.
-                m_useAmfIds = (m_refConfig->getMajorVersion() > 2) ||
-                              (m_refConfig->getMajorVersion() == 2 && m_refConfig->getMinorVersion() >= 5);
-                return;
+                return true;
             }
         }
+        return false;
+    };
+
+    if (scan(m_input.m_tldElements) || scan(m_input.m_subElements) ||
+        scan(m_output.m_tldElements) || scan(m_output.m_subElements))
+    {
+        return true;
     }
-    throwMessage("Requires OCIO library version 2.3.0 or higher.");
+    for (const auto & look : m_look)
+    {
+        if (scan(look->m_subElements))
+            return true;
+    }
+    return false;
+}
+
+std::string AMFParser::Impl::refRoleColorSpace(const char* role, const char* fallback) const
+{
+    if (m_refConfig->hasRole(role))
+    {
+        const char* name = m_refConfig->getRoleColorSpace(role);
+        if (name && *name)
+            return name;
+    }
+    return fallback;
+}
+
+void AMFParser::Impl::clearCopiedInteropIds()
+{
+    // AMFInfo string members point into color space name storage owned by the
+    // config. Capture the current names by value because replacing a color
+    // space below invalidates those pointers.
+    const std::string inputName =
+        m_amfInfoObject->inputColorSpaceName ? m_amfInfoObject->inputColorSpaceName : "";
+    const std::string clipName =
+        m_amfInfoObject->clipColorSpaceName ? m_amfInfoObject->clipColorSpaceName : "";
+
+    std::vector<std::string> names;
+    const int numColorSpaces =
+        m_amfConfig->getNumColorSpaces(SEARCH_REFERENCE_SPACE_ALL, COLORSPACE_ALL);
+    for (int i = 0; i < numColorSpaces; ++i)
+    {
+        names.push_back(
+            m_amfConfig->getColorSpaceNameByIndex(SEARCH_REFERENCE_SPACE_ALL, COLORSPACE_ALL, i));
+    }
+
+    for (const auto & name : names)
+    {
+        ConstColorSpaceRcPtr cs = m_amfConfig->getColorSpace(name.c_str());
+        if (cs && cs->getInteropID() && *cs->getInteropID())
+        {
+            ColorSpaceRcPtr editable = cs->createEditableCopy();
+            editable->setInteropID("");
+            m_amfConfig->addColorSpace(editable);
+        }
+    }
+
+    // Re-point AMFInfo at the (possibly replaced) color space name storage.
+    if (!inputName.empty())
+    {
+        ConstColorSpaceRcPtr cs = m_amfConfig->getColorSpace(inputName.c_str());
+        if (cs)
+            m_amfInfoObject->inputColorSpaceName = cs->getName();
+    }
+    if (!clipName.empty())
+    {
+        ConstColorSpaceRcPtr cs = m_amfConfig->getColorSpace(clipName.c_str());
+        if (cs)
+            m_amfInfoObject->clipColorSpaceName = cs->getName();
+    }
+}
+
+void AMFParser::Impl::loadACESRefConfig(const char* configFilePath)
+{
+    if (configFilePath != NULL)
+    {
+        m_refConfig = Config::CreateFromFile(configFilePath);
+    }
+    else
+    {
+        // Auto-select a builtin reference config based on the ACES version of
+        // the transforms referenced by the AMF. ACES 2 output transforms require
+        // OCIO 2.4+ builtins, which the running library provides.
+        const char* builtinConfig = amfReferencesAces2Transforms()
+            ? "studio-config-latest"
+            : "studio-config-v2.1.0_aces-v1.3_ocio-v2.3";
+        m_refConfig = Config::CreateFromBuiltinConfig(builtinConfig);
+    }
+
+    // Configs at profile version 2.5+ carry the "amf_transform_ids" interchange
+    // attribute, which allows resolving AMF Transform IDs precisely.  Older
+    // configs only have the IDs embedded in the color space descriptions.
+    m_useAmfIds = (m_refConfig->getMajorVersion() > 2) ||
+                  (m_refConfig->getMajorVersion() == 2 && m_refConfig->getMinorVersion() >= 5);
 }
 
 void AMFParser::Impl::initAMFConfig()
 {
     m_amfConfig = Config::CreateRaw()->createEditableCopy();
-    m_amfConfig->setVersion(2, 3);
+    // Match the reference config version so color spaces copied from it (which
+    // may use features newer than 2.3, e.g. ACES 2 builtin transforms) remain
+    // valid in the generated config.
+    m_amfConfig->setVersion(m_refConfig->getMajorVersion(), m_refConfig->getMinorVersion());
 
     m_amfConfig->removeDisplayView("sRGB", "Raw");
     m_amfConfig->removeColorSpace("Raw");
 
+    // Resolve the standard color spaces via roles so this works with both the
+    // ACES 1.x and ACES 2 reference configs (which name some spaces differently,
+    // e.g. the CIE-XYZ-D65 interchange space).
+    const std::string sceneLinearName = refRoleColorSpace("scene_linear", "ACEScg");
+    const std::string colorTimingName = refRoleColorSpace("color_timing", "ACEScct");
+    const std::string cieName         = refRoleColorSpace("cie_xyz_d65_interchange", "CIE-XYZ-D65");
+    const std::string rawName         = refRoleColorSpace("data", "Raw");
+
     ConstColorSpaceRcPtr cs = m_refConfig->getColorSpace(ACES);
     if (!cs)
     {
-        throwMessage("Reference config is missing ACES color space.");
+        throwMessage("Reference config is missing the ACES2065-1 interchange color space.");
         return;
     }
     m_amfConfig->addColorSpace(cs);
-    m_amfConfig->addColorSpace(m_refConfig->getColorSpace("ACEScg"));
-    m_amfConfig->addColorSpace(m_refConfig->getColorSpace("ACEScct"));
-    m_amfConfig->addColorSpace(m_refConfig->getColorSpace("CIE-XYZ-D65"));
-    m_amfConfig->addColorSpace(m_refConfig->getColorSpace("Raw"));
+    m_amfConfig->addColorSpace(m_refConfig->getColorSpace(sceneLinearName.c_str()));
+    m_amfConfig->addColorSpace(m_refConfig->getColorSpace(colorTimingName.c_str()));
+    m_amfConfig->addColorSpace(m_refConfig->getColorSpace(cieName.c_str()));
+    m_amfConfig->addColorSpace(m_refConfig->getColorSpace(rawName.c_str()));
 
-    m_amfConfig->setInactiveColorSpaces("CIE-XYZ-D65");
+    m_amfConfig->setInactiveColorSpaces(cieName.c_str());
 
-    m_amfConfig->setRole("scene_linear", "ACEScg");
+    m_amfConfig->setRole("scene_linear", sceneLinearName.c_str());
     m_amfConfig->setRole("aces_interchange", ACES);
-    m_amfConfig->setRole("cie_xyz_d65_interchange", "CIE-XYZ-D65");
-    m_amfConfig->setRole("color_timing", "ACEScct");
-    m_amfConfig->setRole("compositing_log", "ACEScct");
+    m_amfConfig->setRole("cie_xyz_d65_interchange", cieName.c_str());
+    m_amfConfig->setRole("color_timing", colorTimingName.c_str());
+    m_amfConfig->setRole("compositing_log", colorTimingName.c_str());
     m_amfConfig->setRole("default", NULL);
 
     FileRulesRcPtr rules = FileRules::Create()->createEditableCopy();

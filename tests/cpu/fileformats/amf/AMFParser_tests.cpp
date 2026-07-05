@@ -118,4 +118,43 @@ namespace OCIO_NAMESPACE
         OCIO_REQUIRE_ASSERT(true);
     }
 
+    OCIO_ADD_TEST(AMFParser, CreateFromAMF_aces2_slog3_to_p3d65)
+    {
+        // An AMF that references ACES 2.0 (v2.0) transform IDs must auto-select
+        // an ACES 2 reference config and resolve every transform through the
+        // "amf_transform_ids" interchange attribute.
+        AMFInfoRcPtr amfInfoObject = std::make_shared<AMFInfo>();
+        std::string amfFilePath(GetTestFilesDir() + "/amf/aces2_slog3_to_p3d65.amf");
+        ConstConfigRcPtr amfConfig = CreateFromAMF(amfInfoObject, amfFilePath.c_str());
+
+        OCIO_REQUIRE_ASSERT(amfConfig);
+
+        // The auto-selected ACES 2 studio config is profile version 2.5+.
+        OCIO_CHECK_ASSERT(amfConfig->getMajorVersion() > 2 ||
+                          (amfConfig->getMajorVersion() == 2 && amfConfig->getMinorVersion() >= 5));
+
+        // The input transform (S-Log3) must have resolved to a color space.
+        OCIO_REQUIRE_ASSERT(amfInfoObject->inputColorSpaceName != nullptr);
+        OCIO_CHECK_ASSERT(std::strlen(amfInfoObject->inputColorSpaceName) > 0);
+
+        // The output transform must have produced an active display and view.
+        std::string activeDisplay = amfConfig->getActiveDisplays();
+        std::string activeView    = amfConfig->getActiveViews();
+        OCIO_CHECK_ASSERT(!activeDisplay.empty());
+        OCIO_CHECK_ASSERT(!activeView.empty());
+
+        // Both look transforms (Reference Gamut Compress + a CDL) resolved.
+        OCIO_CHECK_ASSERT(amfConfig->getNumLooks() >= 2);
+
+        // The resolved pipeline must be usable end to end.
+        DisplayViewTransformRcPtr transform = DisplayViewTransform::Create();
+        transform->setSrc(amfInfoObject->inputColorSpaceName);
+        transform->setDisplay(activeDisplay.c_str());
+        transform->setView(activeView.c_str());
+        transform->validate();
+
+        ConstProcessorRcPtr processor = amfConfig->getProcessor(transform);
+        OCIO_CHECK_ASSERT(processor);
+    }
+
 } // namespace OCIO_NAMESPACE
