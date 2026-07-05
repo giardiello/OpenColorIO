@@ -125,7 +125,8 @@ namespace OCIO_NAMESPACE
         // "amf_transform_ids" interchange attribute.
         AMFInfoRcPtr amfInfoObject = std::make_shared<AMFInfo>();
         std::string amfFilePath(GetTestFilesDir() + "/amf/aces2_slog3_to_p3d65.amf");
-        ConstConfigRcPtr amfConfig = CreateFromAMF(amfInfoObject, amfFilePath.c_str());
+        // Exercise the idiomatic Config::CreateFromAMF factory (Phase 4 API).
+        ConstConfigRcPtr amfConfig = Config::CreateFromAMF(amfInfoObject, amfFilePath.c_str());
 
         OCIO_REQUIRE_ASSERT(amfConfig);
 

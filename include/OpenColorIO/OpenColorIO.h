@@ -360,7 +360,30 @@ public:
      * \return The Config object.
      */
     static ConstConfigRcPtr CreateFromConfigIOProxy(ConfigIOProxyRcPtr ciop);
-    
+
+    /**
+     * \brief Create a config that implements the color pipeline of an ACES
+     * Metadata File (AMF).
+     *
+     * The returned config expresses the AMF's input, look and output transforms
+     * as OCIO color spaces, looks, displays and views, so that the AMF pipeline
+     * can be applied through the normal OCIO processing paths. Details about how
+     * the AMF pipeline maps onto the config are reported through \p amfInfoObject.
+     *
+     * When \p configFilePath is null a builtin reference config is selected
+     * automatically based on the ACES version of the transforms the AMF
+     * references (ACES 1.x or ACES 2). Supply a config path to override this.
+     *
+     * \param[out] amfInfoObject Struct describing how the AMF pipeline maps onto the config.
+     * \param amfFilePath Full path to the AMF file.
+     * \param configFilePath Optional reference config path (null to auto-select a builtin).
+     * \throw Exception If there is a problem interpreting the AMF file.
+     * \return The Config object implementing the AMF processing pipeline.
+     */
+    static ConstConfigRcPtr CreateFromAMF(AMFInfoRcPtr amfInfoObject,
+                                          const char * amfFilePath,
+                                          const char * configFilePath = nullptr);
+
     /**
      * \brief Create a configuration using an OCIO built-in config.
      * 
