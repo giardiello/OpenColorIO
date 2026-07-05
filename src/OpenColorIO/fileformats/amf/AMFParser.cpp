@@ -140,9 +140,9 @@ private:
     public:
         void reset()
         {
-			m_subElements.clear();
-			m_attributes.clear();
-		}
+            m_subElements.clear();
+            m_attributes.clear();
+        }
 
         static AMFTransformRcPtr Create()
         {
@@ -178,7 +178,7 @@ private:
     public:
         void reset()
         {
-			AMFTransform::reset();
+            AMFTransform::reset();
             m_tldTemp = std::stack<std::string>();
             m_tldElements.clear();
         }
@@ -998,7 +998,7 @@ void AMFParser::Impl::processLookTransforms()
         if (processLookTransform(**it, index, (m_numLooksBeforeWorkingLocation < 0 ?
                                                 AMF_NO_WORKING_LOCATION :
                                                 (index <= m_numLooksBeforeWorkingLocation ? AMF_PRE_WORKING_LOCATION : AMF_POST_WORKING_LOCATION))))
-			m_amfInfoObject->numLooksApplied++;
+            m_amfInfoObject->numLooksApplied++;
         index++;
     }
 

@@ -8,11 +8,11 @@
 
 namespace OCIO_NAMESPACE
 {
-	OCIO_ADD_TEST(AMFParser, CreateFromAMF_slogtopq)
-	{
-		AMFInfoRcPtr amfInfoObject = std::make_shared<AMFInfo>();
-		std::string amfFilePath(GetTestFilesDir() + "/amf/slogtopq.amf");
-		ConstConfigRcPtr amfConfig = CreateFromAMF(amfInfoObject, amfFilePath.c_str());
+    OCIO_ADD_TEST(AMFParser, CreateFromAMF_slogtopq)
+    {
+        AMFInfoRcPtr amfInfoObject = std::make_shared<AMFInfo>();
+        std::string amfFilePath(GetTestFilesDir() + "/amf/slogtopq.amf");
+        ConstConfigRcPtr amfConfig = CreateFromAMF(amfInfoObject, amfFilePath.c_str());
 
         int numRoles = amfConfig->getNumRoles();
         OCIO_REQUIRE_ASSERT(numRoles > 0);
@@ -61,7 +61,7 @@ namespace OCIO_NAMESPACE
 
         }
         OCIO_REQUIRE_ASSERT(true);
-	}
+    }
 
     OCIO_ADD_TEST(AMFParser, CreateFromAMF_slogtopq_wlook)
     {
