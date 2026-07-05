@@ -186,6 +186,28 @@ void bindPyConfig(py::module & m)
         py::class_<ActiveNamedTransformIterator>(
             clsConfig, "ActiveNamedTransformIterator");
 
+    // AMFInfo: read-only view of how an AMF pipeline maps onto the config.
+    auto strOrEmpty = [](const char * s) { return s ? std::string(s) : std::string(); };
+    py::class_<AMFInfo, AMFInfoRcPtr>(m.attr("AMFInfo"))
+        .def_property_readonly("clipIdentifier",
+            [strOrEmpty](const AMFInfoRcPtr & self) { return strOrEmpty(self->clipIdentifier); },
+            "Unique identifier appended to config items derived from this AMF.")
+        .def_property_readonly("clipColorSpaceName",
+            [strOrEmpty](const AMFInfoRcPtr & self) { return strOrEmpty(self->clipColorSpaceName); },
+            "Name of the color space for the media (clip) the AMF describes.")
+        .def_property_readonly("inputColorSpaceName",
+            [strOrEmpty](const AMFInfoRcPtr & self) { return strOrEmpty(self->inputColorSpaceName); },
+            "Name of the color space for the AMF Input Transform.")
+        .def_property_readonly("numLooksApplied",
+            [](const AMFInfoRcPtr & self) { return self->numLooksApplied; },
+            "Number of AMF Look Transforms that were applied to the clip.")
+        .def_property_readonly("displayName",
+            [strOrEmpty](const AMFInfoRcPtr & self) { return strOrEmpty(self->displayName); },
+            "Name of the OCIO display corresponding to the AMF Output Transform.")
+        .def_property_readonly("viewName",
+            [strOrEmpty](const AMFInfoRcPtr & self) { return strOrEmpty(self->viewName); },
+            "Name of the OCIO view corresponding to the AMF Output Transform.");
+
     clsConfig
         .def(py::init(&Config::Create), 
              DOC(Config, Create))
@@ -214,6 +236,22 @@ void bindPyConfig(py::module & m)
                     DOC(Config, CreateFromBuiltinConfig))
         .def_static("CreateFromConfigIOProxy", &Config::CreateFromConfigIOProxy,
                     DOC(Config, CreateFromConfigIOProxy))
+        .def_static("CreateFromAMF", [](const std::string & amfFilePath,
+                                        const std::string & configFilePath)
+            {
+                AMFInfoRcPtr amfInfo = std::make_shared<AMFInfo>();
+                ConstConfigRcPtr config = Config::CreateFromAMF(
+                    amfInfo,
+                    amfFilePath.c_str(),
+                    configFilePath.empty() ? nullptr : configFilePath.c_str());
+                // Return both the config and the AMFInfo describing the mapping.
+                return py::make_tuple(config, amfInfo);
+            },
+            "amfFilePath"_a, "configFilePath"_a = "",
+            "Create a config that implements the pipeline of an ACES Metadata File "
+            "(AMF). Returns a tuple of (Config, AMFInfo). When configFilePath is "
+            "empty a builtin reference config is auto-selected based on the ACES "
+            "version referenced by the AMF.")
         .def("getMajorVersion", &Config::getMajorVersion, 
              DOC(Config, getMajorVersion))
         .def("setMajorVersion", &Config::setMajorVersion, "major"_a, 
